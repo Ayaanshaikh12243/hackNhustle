@@ -112,7 +112,7 @@ class CLIPImageVectorizer:
         return Image.fromarray(img_array[y_min:y_max, x_min:x_max])
     
     def extract_landmarks(self, img):
-        """Extract 138D landmarks with Tasks API"""
+        """Extract normalized 138D landmarks"""
         if not self.hands or not self.pose:
             return np.zeros(138)
         
@@ -123,21 +123,30 @@ class CLIPImageVectorizer:
         
         landmarks = np.zeros(138)
         
+        # Normalize hand landmarks relative to wrist (landmark 0)
         if hand_results.hand_landmarks:
             for i, hand_landmarks in enumerate(hand_results.hand_landmarks[:2]):
                 offset = i * 63
+                wrist = hand_landmarks[0]  # Wrist is landmark 0
                 for j, lm in enumerate(hand_landmarks):
-                    landmarks[offset + j*3] = lm.x
-                    landmarks[offset + j*3 + 1] = lm.y
-                    landmarks[offset + j*3 + 2] = lm.z
+                    landmarks[offset + j*3] = lm.x - wrist.x
+                    landmarks[offset + j*3 + 1] = lm.y - wrist.y
+                    landmarks[offset + j*3 + 2] = lm.z - wrist.z
         
+        # Normalize pose landmarks (shoulders/elbows) relative to elbow midpoint
         if pose_results.pose_landmarks:
             for landmarks_list in pose_results.pose_landmarks:
+                left_elbow = landmarks_list[13]   # Left elbow
+                right_elbow = landmarks_list[14]  # Right elbow
+                elbow_center_x = (left_elbow.x + right_elbow.x) / 2
+                elbow_center_y = (left_elbow.y + right_elbow.y) / 2
+                elbow_center_z = (left_elbow.z + right_elbow.z) / 2
+                
                 for i, idx in enumerate([11, 12, 13, 14]):
                     lm = landmarks_list[idx]
-                    landmarks[126 + i*3] = lm.x
-                    landmarks[126 + i*3 + 1] = lm.y
-                    landmarks[126 + i*3 + 2] = lm.z
+                    landmarks[126 + i*3] = lm.x - elbow_center_x
+                    landmarks[126 + i*3 + 1] = lm.y - elbow_center_y
+                    landmarks[126 + i*3 + 2] = lm.z - elbow_center_z
         
         return landmarks
     
@@ -219,7 +228,7 @@ class CLIPImageVectorizer:
         
         for subdir in subdirs:
             label = subdir.name.lower()
-            images = [f for f in subdir.iterdir() if f.suffix.lower() in image_exts]
+            images = [f for f in subdir.iterdir() if f.suffix.lower() in image_exts][:1200]  # Max 200 per folder
             
             if not images:
                 continue

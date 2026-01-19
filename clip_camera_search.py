@@ -296,8 +296,8 @@ class CLIPCameraSearch:
 def main():
     parser = argparse.ArgumentParser(description='CLIP Camera Search')
     parser.add_argument('--collection', default='clip_videos')
-    parser.add_argument('--model', default='google/siglip-so400m-patch14-384',
-                       help='Model: google/siglip-so400m-patch14-384 (best), google/siglip-base-patch16-224 (fast)')
+    parser.add_argument('--model', default='google/siglip-large-patch16-384',
+                       help='Model: google/siglip-large-patch16-384 (1024D), google/siglip-base-patch16-224 (768D)')
     parser.add_argument('--buffer', type=int, default=3, help='Buffer seconds (default: 3)')
     parser.add_argument('--fps', type=int, default=10, help='Processing FPS (default: 10)')
     

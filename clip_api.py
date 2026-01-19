@@ -24,7 +24,13 @@ from transformers import AutoProcessor, AutoModel
 import io
 from typing import List
 import cv2
-import mediapipe as mp
+try:
+    import mediapipe as mp
+    from mediapipe.tasks import python
+    from mediapipe.tasks.python import vision
+    MEDIAPIPE_AVAILABLE = True
+except:
+    MEDIAPIPE_AVAILABLE = False
 
 load_dotenv()
 
@@ -73,18 +79,25 @@ async def load_model():
     model_state.model.to(model_state.device)
     model_state.model.eval()
     
-    # MediaPipe Hands
-    model_state.hands = mp.solutions.hands.Hands(
-        static_image_mode=True,
-        max_num_hands=2,
-        min_detection_confidence=0.5
-    )
-    
-    # MediaPipe Pose
-    model_state.pose = mp.solutions.pose.Pose(
-        static_image_mode=True,
-        min_detection_confidence=0.5
-    )
+    # MediaPipe Tasks API
+    if MEDIAPIPE_AVAILABLE:
+        try:
+            hand_base = python.BaseOptions(model_asset_path='models/hand_landmarker.task')
+            hand_opts = vision.HandLandmarkerOptions(base_options=hand_base, num_hands=2)
+            model_state.hands = vision.HandLandmarker.create_from_options(hand_opts)
+            
+            pose_base = python.BaseOptions(model_asset_path='models/pose_landmarker_lite.task')
+            pose_opts = vision.PoseLandmarkerOptions(base_options=pose_base)
+            model_state.pose = vision.PoseLandmarker.create_from_options(pose_opts)
+            print("✓ MediaPipe Tasks API initialized")
+        except:
+            model_state.hands = None
+            model_state.pose = None
+            print("⚠ MediaPipe models not found")
+    else:
+        model_state.hands = None
+        model_state.pose = None
+        print("⚠ MediaPipe not available")
     
     # Qdrant setup
     raw_url = os.getenv('q_url', 'http://localhost:6333')
@@ -102,42 +115,43 @@ async def load_model():
         model_state.headers['api-key'] = api_key
     
     print(f"✓ Model loaded on {model_state.device}")
-    print(f"✓ MediaPipe Hands + Pose initialized")
     print(f"✓ Qdrant: {model_state.qdrant_url}")
 
 def crop_upper_body(image: Image.Image, padding: float = 0.2) -> Image.Image:
-    """Crop to hands, elbows, and shoulders with padding"""
+    """Crop to upper body with MediaPipe Tasks API"""
     img_array = np.array(image)
-    rgb = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-    
-    hand_results = model_state.hands.process(cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB))
-    pose_results = model_state.pose.process(cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB))
-    
     h, w = img_array.shape[:2]
+    
+    if not model_state.hands or not model_state.pose:
+        crop_h = int(h * 0.6)
+        start_y = (h - crop_h) // 2
+        return Image.fromarray(img_array[start_y:start_y + crop_h, :])
+    
+    mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_array)
+    hand_results = model_state.hands.detect(mp_img)
+    pose_results = model_state.pose.detect(mp_img)
+    
     all_x, all_y = [], []
     
-    # Collect hand landmarks
-    if hand_results.multi_hand_landmarks:
-        for hand_landmarks in hand_results.multi_hand_landmarks:
-            for lm in hand_landmarks.landmark:
+    if hand_results.hand_landmarks:
+        for hand_landmarks in hand_results.hand_landmarks:
+            for lm in hand_landmarks:
                 all_x.append(int(lm.x * w))
                 all_y.append(int(lm.y * h))
     
-    # Collect pose landmarks (shoulders: 11,12; elbows: 13,14)
     if pose_results.pose_landmarks:
-        for idx in [11, 12, 13, 14]:  # Left/right shoulder and elbow
-            lm = pose_results.pose_landmarks.landmark[idx]
-            if lm.visibility > 0.5:
-                all_x.append(int(lm.x * w))
-                all_y.append(int(lm.y * h))
+        for landmarks in pose_results.pose_landmarks:
+            for idx in [11, 12, 13, 14]:
+                lm = landmarks[idx]
+                if lm.visibility > 0.5:
+                    all_x.append(int(lm.x * w))
+                    all_y.append(int(lm.y * h))
     
     if not all_x:
-        return image  # No landmarks detected
+        return image
     
-    # Get bounding box with padding
     x_min, x_max = min(all_x), max(all_x)
     y_min, y_max = min(all_y), max(all_y)
-    
     pad_x = int((x_max - x_min) * padding)
     pad_y = int((y_max - y_min) * padding)
     
@@ -146,38 +160,44 @@ def crop_upper_body(image: Image.Image, padding: float = 0.2) -> Image.Image:
     y_min = max(0, y_min - pad_y)
     y_max = min(h, y_max + pad_y)
     
-    cropped = img_array[y_min:y_max, x_min:x_max]
-    return Image.fromarray(cropped)
+    return Image.fromarray(img_array[y_min:y_max, x_min:x_max])
 
 def extract_landmarks(image: Image.Image) -> np.ndarray:
-    """Extract hand + upper body landmarks"""
+    """Extract normalized hand + upper body landmarks"""
+    if not model_state.hands or not model_state.pose:
+        return np.zeros(138)
+    
     img_array = np.array(image)
-    rgb = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+    mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_array)
+    hand_results = model_state.hands.detect(mp_img)
+    pose_results = model_state.pose.detect(mp_img)
     
-    hand_results = model_state.hands.process(cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB))
-    pose_results = model_state.pose.process(cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB))
-    
-    # Hands: 21 landmarks × 3 coords × 2 hands = 126D
-    # Pose: 4 landmarks (shoulders + elbows) × 3 coords = 12D
-    # Total: 138D
     landmarks = np.zeros(138)
     
-    # Extract hand landmarks
-    if hand_results.multi_hand_landmarks:
-        for i, hand_landmarks in enumerate(hand_results.multi_hand_landmarks[:2]):
+    # Normalize hand landmarks relative to wrist
+    if hand_results.hand_landmarks:
+        for i, hand_landmarks in enumerate(hand_results.hand_landmarks[:2]):
             offset = i * 63
-            for j, lm in enumerate(hand_landmarks.landmark):
-                landmarks[offset + j*3] = lm.x
-                landmarks[offset + j*3 + 1] = lm.y
-                landmarks[offset + j*3 + 2] = lm.z
+            wrist = hand_landmarks[0]
+            for j, lm in enumerate(hand_landmarks):
+                landmarks[offset + j*3] = lm.x - wrist.x
+                landmarks[offset + j*3 + 1] = lm.y - wrist.y
+                landmarks[offset + j*3 + 2] = lm.z - wrist.z
     
-    # Extract pose landmarks (shoulders: 11,12; elbows: 13,14)
+    # Normalize pose landmarks relative to elbow midpoint
     if pose_results.pose_landmarks:
-        for i, idx in enumerate([11, 12, 13, 14]):
-            lm = pose_results.pose_landmarks.landmark[idx]
-            landmarks[126 + i*3] = lm.x
-            landmarks[126 + i*3 + 1] = lm.y
-            landmarks[126 + i*3 + 2] = lm.z
+        for landmarks_list in pose_results.pose_landmarks:
+            left_elbow = landmarks_list[13]
+            right_elbow = landmarks_list[14]
+            elbow_center_x = (left_elbow.x + right_elbow.x) / 2
+            elbow_center_y = (left_elbow.y + right_elbow.y) / 2
+            elbow_center_z = (left_elbow.z + right_elbow.z) / 2
+            
+            for i, idx in enumerate([11, 12, 13, 14]):
+                lm = landmarks_list[idx]
+                landmarks[126 + i*3] = lm.x - elbow_center_x
+                landmarks[126 + i*3 + 1] = lm.y - elbow_center_y
+                landmarks[126 + i*3 + 2] = lm.z - elbow_center_z
     
     return landmarks
 
@@ -195,7 +215,7 @@ def encode_image(image: Image.Image) -> np.ndarray:
     
     return features.cpu().numpy().flatten()
 
-def search_qdrant(img_vector: np.ndarray, landmark_vector: np.ndarray, top_k: int = 10) -> List[dict]:
+def search_qdrant(img_vector: np.ndarray, landmark_vector: np.ndarray, top_k: int = 10, img_weight: float = 0.4, landmark_weight: float = 0.6) -> List[dict]:
     """Search Qdrant with combined image + landmark vectors"""
     try:
         # Search image collection
@@ -214,18 +234,18 @@ def search_qdrant(img_vector: np.ndarray, landmark_vector: np.ndarray, top_k: in
             timeout=5
         )
         
-        # Combine scores (60% image, 40% landmarks)
+        # Combine scores with configurable weights
         combined = {}
         
         if r1.status_code == 200:
             for hit in r1.json().get('result', []):
                 label = hit["payload"]["label"]
-                combined[label] = hit["score"] * 0.6
+                combined[label] = hit["score"] * img_weight
         
         if r2.status_code == 200:
             for hit in r2.json().get('result', []):
                 label = hit["payload"]["label"]
-                combined[label] = combined.get(label, 0) + hit["score"] * 0.4
+                combined[label] = combined.get(label, 0) + hit["score"] * landmark_weight
         
         # Sort by combined score
         sorted_results = sorted(combined.items(), key=lambda x: x[1], reverse=True)[:top_k]
@@ -246,7 +266,7 @@ async def health():
     }
 
 @app.post("/search", response_model=SearchResponse)
-async def search_image(file: UploadFile = File(...), top_k: int = 5):
+async def search_image(file: UploadFile = File(...), top_k: int = 5, img_weight: float = 0.4, landmark_weight: float = 0.6):
     """
     Upload an image and get top matching labels
     
@@ -276,7 +296,7 @@ async def search_image(file: UploadFile = File(...), top_k: int = 5):
         landmark_vector = extract_landmarks(image)
         
         # Search
-        results = search_qdrant(img_vector, landmark_vector, top_k)
+        results = search_qdrant(img_vector, landmark_vector, top_k, img_weight, landmark_weight)
         
         processing_time = (time.time() - start) * 1000
         
@@ -315,7 +335,7 @@ async def search_batch(files: List[UploadFile] = File(...), top_k: int = 5):
             cropped = crop_upper_body(image, padding=0.2)
             img_vector = encode_image(cropped)
             landmark_vector = extract_landmarks(image)
-            results = search_qdrant(img_vector, landmark_vector, top_k)
+            results = search_qdrant(img_vector, landmark_vector, top_k, 0.4, 0.6)
             processing_time = (time.time() - start) * 1000
             
             responses.append(SearchResponse(
