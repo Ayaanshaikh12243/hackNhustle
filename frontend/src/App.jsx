@@ -9,6 +9,7 @@ import TracingPad from './components/TracingPad'
 import DailyQuest from './components/DailyQuest'
 import Dictionary from './components/Dictionary'
 import Flashcards from './components/Flashcards'
+import Lessons from './components/Lessons'
 import { Routes, Route } from 'react-router-dom'
 import './index.css'
 
@@ -22,9 +23,6 @@ function App() {
       <Route path="/sign-to-word" element={<SignToWord />} />
       <Route path="/practice" element={<Practice />} />
       <Route path="/tracing" element={<TracingPad />} />
-      <Route path="/daily-quest" element={<DailyQuest />} />
-      <Route path="/dictionary" element={<Dictionary />} />
-      <Route path="/flashcards" element={<Flashcards />} />
       <Route path="/profile" element={<UserProfile />} />
       <Route path="/stats" element={<Dashboard />} />
     </Routes>
