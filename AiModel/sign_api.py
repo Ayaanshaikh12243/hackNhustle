@@ -3,12 +3,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import numpy as np
 import cv2
-import json
+import os
 import mediapipe as mp
 from pathlib import Path
 from typing import List, Optional
-import io
-from PIL import Image
+from qdrant_client import QdrantClient
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = FastAPI(title="Sign Language Recognition API")
 
@@ -37,14 +39,13 @@ class ModelState:
         self.hands = None
         self.pose = None
         self.face = None
-        self.vectors = None
-        self.labels = None
+        self.qdrant = None
+        self.collection_name = "sign_vectors"
 
 model_state = ModelState()
 
 @app.on_event("startup")
 async def load_models():
-    """Load MediaPipe models and vectors on startup"""
     print("Loading MediaPipe models...")
     
     BaseOptions = mp.tasks.BaseOptions
@@ -80,21 +81,20 @@ async def load_models():
         )
     )
     
-    print("Loading vectors...")
-    vectors = []
-    labels = []
+    print("Connecting to Qdrant...")
+    qdrant_url = os.getenv('q_url', 'http://localhost:6333')
+    qdrant_api_key = os.getenv('q_api', '')
     
-    vectors_path = Path("vectors")
-    for json_file in vectors_path.rglob("*.json"):
-        with open(json_file) as f:
-            data = json.load(f)
-            vectors.append(np.array(data["vector"]))
-            labels.append(data["label"])
+    if 'cloud.qdrant.io' in qdrant_url and not qdrant_url.startswith('http'):
+        qdrant_url = f"https://{qdrant_url}"
     
-    model_state.vectors = np.array(vectors)
-    model_state.labels = labels
+    model_state.qdrant = QdrantClient(
+        url=qdrant_url,
+        api_key=qdrant_api_key if qdrant_api_key else None
+    )
     
-    print(f"✓ Loaded {len(model_state.vectors)} vectors")
+    print(f"✓ MediaPipe loaded")
+    print(f"✓ Qdrant connected: {qdrant_url}")
 
 def extract_features(frame):
     """Extract normalized features from frame"""
@@ -181,28 +181,23 @@ def extract_features(frame):
     return np.array(features)
 
 def find_matches(features, top_k=5):
-    """Find top K matches using cosine similarity"""
     if features is None:
         return []
     
-    # Normalize
-    features_norm = features / (np.linalg.norm(features) + 1e-8)
-    vectors_norm = model_state.vectors / (np.linalg.norm(model_state.vectors, axis=1, keepdims=True) + 1e-8)
-    
-    # Cosine similarity
-    similarities = np.dot(vectors_norm, features_norm)
-    
-    # Get top K
-    top_indices = np.argsort(similarities)[::-1][:top_k]
-    
-    results = []
-    for idx in top_indices:
-        results.append({
-            "label": model_state.labels[idx],
-            "confidence": float(similarities[idx])
-        })
-    
-    return results
+    try:
+        results = model_state.qdrant.query_points(
+            collection_name=model_state.collection_name,
+            query=features.tolist(),
+            limit=top_k
+        )
+        
+        return [
+            {"label": r.payload["label"], "confidence": float(r.score)}
+            for r in results.points
+        ]
+    except Exception as e:
+        print(f"Qdrant error: {e}")
+        return []
 
 @app.post("/recognize/image", response_model=RecognitionResponse)
 async def recognize_image(file: UploadFile = File(...), top_k: int = 5):
@@ -278,10 +273,17 @@ async def recognize_landmarks(request: LandmarkRequest):
 
 @app.get("/health")
 async def health():
-    """Health check endpoint"""
+    try:
+        collection_info = model_state.qdrant.get_collection(model_state.collection_name)
+        vector_count = collection_info.points_count
+    except:
+        vector_count = 0
+    
     return {
         "status": "healthy",
-        "vectors_loaded": len(model_state.vectors) if model_state.vectors is not None else 0
+        "qdrant_connected": model_state.qdrant is not None,
+        "collection": model_state.collection_name,
+        "vectors_count": vector_count
     }
 
 @app.get("/")

@@ -215,6 +215,6 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 /test
-/models
+
 /api_test
 .DS_Store

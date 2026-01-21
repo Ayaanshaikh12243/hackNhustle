@@ -1,12 +1,16 @@
 import cv2
 import numpy as np
-import json
+import os
 import mediapipe as mp
 from pathlib import Path
 from collections import deque
+from qdrant_client import QdrantClient
+from dotenv import load_dotenv
+
+load_dotenv()
 
 class LiveSignRecognizer:
-    def __init__(self, vectors_dir="vectors", video_mode=False):
+    def __init__(self, collection_name="sign_vectors", video_mode=False):
         # Load MediaPipe
         BaseOptions = mp.tasks.BaseOptions
         HandLandmarker = mp.tasks.vision.HandLandmarker
@@ -41,20 +45,20 @@ class LiveSignRecognizer:
             )
         )
         
-        # Load all vectors
-        print("Loading vectors...")
-        self.vectors = []
-        self.labels = []
+        # Connect to Qdrant
+        print("Connecting to Qdrant...")
+        qdrant_url = os.getenv('q_url', 'http://localhost:6333')
+        qdrant_api_key = os.getenv('q_api', '')
         
-        vectors_path = Path(vectors_dir)
-        for json_file in vectors_path.rglob("*.json"):
-            with open(json_file) as f:
-                data = json.load(f)
-                self.vectors.append(np.array(data["vector"]))
-                self.labels.append(data["label"])
+        if 'cloud.qdrant.io' in qdrant_url and not qdrant_url.startswith('http'):
+            qdrant_url = f"https://{qdrant_url}"
         
-        self.vectors = np.array(self.vectors)
-        print(f"Loaded {len(self.vectors)} vectors")
+        self.qdrant = QdrantClient(
+            url=qdrant_url,
+            api_key=qdrant_api_key if qdrant_api_key else None
+        )
+        self.collection_name = collection_name
+        print(f"✓ Connected to Qdrant: {qdrant_url}")
         
         # Smoothing
         self.prediction_history = deque(maxlen=5)
@@ -145,19 +149,23 @@ class LiveSignRecognizer:
         return np.array(features)
     
     def find_match(self, features):
-        """Find closest match using cosine similarity"""
+        """Find closest match using Qdrant"""
         if features is None:
             return None, 0.0
         
-        # Normalize
-        features_norm = features / (np.linalg.norm(features) + 1e-8)
-        vectors_norm = self.vectors / (np.linalg.norm(self.vectors, axis=1, keepdims=True) + 1e-8)
-        
-        # Cosine similarity
-        similarities = np.dot(vectors_norm, features_norm)
-        best_idx = np.argmax(similarities)
-        
-        return self.labels[best_idx], similarities[best_idx]
+        try:
+            results = self.qdrant.query_points(
+                collection_name=self.collection_name,
+                query=features.tolist(),
+                limit=1
+            )
+            
+            if results.points:
+                return results.points[0].payload["label"], results.points[0].score
+            return None, 0.0
+        except Exception as e:
+            print(f"Qdrant search error: {e}")
+            return None, 0.0
     
     def run(self, video_path=None):
         """Run live recognition from webcam or video file"""
