@@ -15,7 +15,7 @@ import base64
 import io
 
 load_dotenv()
-pls
+
 app = Flask(__name__)
 
 # CORS Configuration for Production
