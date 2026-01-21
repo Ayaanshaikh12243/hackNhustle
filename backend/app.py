@@ -1536,6 +1536,43 @@ def health_check():
             'timestamp': datetime.utcnow().isoformat()
         }), 500
 
+# Flashcards endpoints
+@app.route('/flashcards/random', methods=['GET'])
+def get_random_flashcard():
+    try:
+        import os
+        import random
+        
+        dataset_path = os.path.join('..', 'frontend', 'public', 'dataset', 'Frames_Word_Level')
+        
+        # Get all word folders
+        word_folders = [f for f in os.listdir(dataset_path) if os.path.isdir(os.path.join(dataset_path, f))]
+        
+        if not word_folders:
+            return jsonify({'error': 'No word folders found'}), 404
+        
+        # Pick random word folder
+        random_word = random.choice(word_folders)
+        word_path = os.path.join(dataset_path, random_word)
+        
+        # Get all images in that folder
+        images = [f for f in os.listdir(word_path) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+        
+        if not images:
+            return jsonify({'error': f'No images found in {random_word}'}), 404
+        
+        # Pick random image
+        random_image = random.choice(images)
+        
+        return jsonify({
+            'word': random_word.replace('_', ' '),
+            'image_path': f'/dataset/Frames_Word_Level/{random_word}/{random_image}',
+            'folder': random_word
+        }), 200
+    
+    except Exception as e:
+        return jsonify({'error': f'Error: {str(e)}'}), 500
+
 @app.route('/feedback', methods=['POST'])
 @token_required
 def submit_feedback(current_user):
